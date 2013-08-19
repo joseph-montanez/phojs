@@ -110,6 +110,7 @@ class Phojs {
 
 	public function parse($fn, $code, $phpjs = false) {
 		$parser = new PHPParser_Parser(new PHPParser_Lexer);
+		$code = str_replace(array('<? ', '<?='), array('<?php ', '<?php echo '), $code);
 		
 		try {
 			$stmts = $parser->parse($code);
