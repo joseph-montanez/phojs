@@ -97,15 +97,65 @@ class Phojs {
 	public static $used_phpjs_functions = array();
 	public $js_functions = array();
 	public $cache_folder = 'data';
+	public $dir_functions = '';
+	public $dir_compile   = '';
 	
-	public function __construct($filenames = null, $use_cache = true){
-		foreach((array)$filenames as $filename){
+	public function __construct($filenames = null, $use_cache = true) {
+		foreach ((array) $filenames as $filename) {
 			$this->addFile($filename, $use_cache);
 		}
+		$this->dir_functions = realpath(__DIR__ . '/../../../kvz/phpjs/functions');
+		$this->dir_compile   = realpath(__DIR__ . '/data');
 	}
 	
-	public function __toString(){
+	public function __toString() {
 		return $this->render(true, true);
+	}
+
+	public function toCoffee($fn, $code, $wrap = false) {
+		$parser = new PHPParser_Parser(new PHPParser_Lexer);
+		
+		try {
+			$stmts = $parser->parse($code);
+			$out = '';
+			$scope = array(
+				'level' => 0, 
+				//-- used for phpjs compiler
+				'native' => array(), 
+				'vars' => array('data' => 0, 'js_rs' => 0), 
+				'innerscope' => array(), 
+				'outterscope' => null
+			);
+			self::resolve($stmts, $out, 1, $scope);
+			$out = rtrim($out, PHP_EOL);
+		} catch (PHPParser_Error $e) {
+			echo 'Parse Error: ', $e->getMessage();
+		}
+		
+		if ($wrap) {
+			$coffee = "phojs['{$fn}'] = (data) -> " . PHP_EOL .
+				"\tjs_rs = []" . PHP_EOL .
+				"{$out}" . PHP_EOL .
+				"\tjs_rs.join('')" . PHP_EOL;
+		} else {
+			$coffee = "\tjs_rs = []" . PHP_EOL . $out . PHP_EOL;
+		}
+
+		return $coffee;
+	}
+
+	public function toJavascript($code, $phpjs = false) {
+		CoffeeScript\Init::load();
+
+		$js = '';
+		if ($phpjs) {
+			$js .= $this->compilePhpJs() . PHP_EOL;
+		}
+
+		$js = CoffeeScript\Compiler::compile($code, array('header' => false));
+		$js = '  ' . trim(substr($js, 13, -15)) . PHP_EOL;
+		$js = "function (_resp) {\n{$js}}\n";
+		return $js;
 	}
 
 	public function parse($fn, $code, $phpjs = false) {
@@ -144,7 +194,7 @@ class Phojs {
 	public function addString($fn, $code) {
 		$md5 = md5($code);
 		$cached_filepath = $this->cache_folder . '/' . $fn . '.js';
-		$function = $this->parse($fn, $code, false);    //$phpjs == false because it's done later, not per parse call
+		$function = $this->toJavascript($this->toCoffee($fn, $code, false));
 		$this->js_functions[$fn] = $function;
 	}
 	
@@ -189,10 +239,10 @@ class Phojs {
 			return '';
 		}
 		
-		//sort and unique
-		self::$used_phpjs_functions = array_unique(self::$used_phpjs_functions);
+		//-- Sort and Unique
+		self::$used_phpjs_functions = array_keys(self::$used_phpjs_functions);
 		sort(self::$used_phpjs_functions);
-		$cached_filepath = SITE_PATH.$this->cache_folder . '/phpjs-' . implode('-', self::$used_phpjs_functions) . '.js';
+		$cached_filepath = $this->cache_folder . '/phpjs-' . md5(implode('-', self::$used_phpjs_functions)) . '.js';
 		
 		if($use_phpjs_cache){
 			$cached_code = @file_get_contents($cached_filepath);
@@ -201,9 +251,7 @@ class Phojs {
 			}
 		}
 		
-		$dirFunctions = '';     //"js_template/kvz-phpjs-1c57762/functions";
-		$dirCompile   = '';     //"js_template/kvz-phpjs-1c57762";
-		$PHPJS_Compiler_Shell = new PHPJS_Library_Compiler_Shell($dirFunctions, $dirCompile);
+		$PHPJS_Compiler_Shell = new PHPJS_Library_Compiler_Shell($this->dir_functions, $this->dir_compile);
 		foreach (self::$used_phpjs_functions as $phpjs_function) {
 			$PHPJS_Compiler_Shell->addToSelection('function::' . $phpjs_function);
 		}
@@ -211,7 +259,12 @@ class Phojs {
 		$flags = $flags | PHPJS_Library_Compiler::COMPILE_MINFIED;
 		$code = $PHPJS_Compiler_Shell->compile($flags);
 		
-		//cache the code
+		$fi = new SplFileInfo($cached_filepath);
+		if (!is_dir($fi->getPath())) {
+			mkdir($fi->getPath(), 0777, true);
+		}
+
+		//-- Cache the code
 		file_put_contents($cached_filepath, $code);
 		
 		return $code;
@@ -251,9 +304,12 @@ class Phojs {
 					$expression = '';
 					self::resolve(array($stmt->var), $var_str, 0, $scope);
 					self::resolve(array($stmt->expr), $expression, 0, $scope);
+
+					$expression = rtrim($expression, PHP_EOL);
+
 					if ($stmt->var->getType() === 'Expr_ArrayDimFetch') {
-						self::$used_phpjs_functions[] = 'array_push';
-						$str .= $tab . "array_push({$var_str}, {$expression});" . PHP_EOL;
+						self::$used_phpjs_functions['array_push'] = 0;
+						$str .= $tab . "array_push({$var_str}, {$expression})" . PHP_EOL;
 					} else {
 						$var_key = $var_str;
 						if (substr($var_key, 0, 5) === 'data.') {
@@ -261,9 +317,9 @@ class Phojs {
 						}
 						if (isset($scope['vars'][$var_key]) === false) {
 							$scope['vars'][$var_key] = 0;
-							$var_str = 'var ' . $var_key;
+							$var_str = $var_key;
 						}
-						$str .= $tab . rtrim("{$var_str} = {$expression}", ';') . ';' . PHP_EOL;
+						$str .= $tab . rtrim("{$var_str} = {$expression}") . PHP_EOL;
 						
 					}
 				}
@@ -277,7 +333,6 @@ class Phojs {
 					$value_str = '';
 					self::resolve(array($stmt->value), $value_str, $level, $scope);
 					$value_str .= ', ';
-					$value_str = trim($value_str);
 					$str .= $tab . "$value_str";
 				}
 				else if ($type === 'Name') {
@@ -292,6 +347,7 @@ class Phojs {
 					}
 					$value = '';
 					self::resolve(array($stmt->value), $value, 0, $scope);
+					$value = rtrim($value, PHP_EOL);
 
 					if (is_object($key)) {
 						$key_str = '';
@@ -308,9 +364,7 @@ class Phojs {
 					//var_dump($stmt);
 					$name = $stmt->name;
 					if (isset($scope['vars'][$name]) === false) {
-						if (!in_array($name, array('_REQUEST', '_SERVER', '_GET', '_POST', '_SESSION'))) {
-							$name = 'data.' . $name;
-						}
+						$name = 'data.' . $name;
 					}
 					$str .= $name;
 				}
@@ -319,20 +373,23 @@ class Phojs {
 					self::resolve(array($stmt->name), $name_str, $level, $scope);
 					if (in_array($name_str, self::$phpjs_functions)) {
 						//$scope['native'][] = $name_str;
-						self::$used_phpjs_functions[] = $name_str;
+						self::$used_phpjs_functions[$name_str] = 0;
 					}
-					//$name = $stmt->name->name;
-					$args_str = array();;
-					foreach ($stmt->args as $arg) {
+					$args_str = '';
+					$args_arr = array();
+					foreach($stmt->args as $arg) {
 						$arg_str = '';
-						self::resolve(array($arg->value), $arg_str, $level, $scope);
-						$arg_str = trim($arg_str);
-						$args_str[] = $arg_str;
+						self::resolve(array($arg), $arg_str, $level, $scope);
+						$arg_str = rtrim($arg_str, ', ');
+						$arg_str = rtrim($arg_str, PHP_EOL);
+						$arg_str = ltrim($arg_str);
+
+						$args_arr []= $arg_str;
 					}
-					$args_str = implode(', ', $args_str);
-					$args_str = rtrim($args_str, ';');
+					$args_str = implode(', ', $args_arr);
+					$args_str = rtrim($args_str, ', ');
 					$args_str = rtrim($args_str, PHP_EOL);
-					$str .= "{$name_str}({$args_str});";
+					$str .= $tab . "{$name_str}({$args_str})" . PHP_EOL;
 				}
 				else if ($type === 'Expr_Closure') {
 					$closure_str = '';
@@ -344,9 +401,8 @@ class Phojs {
 					}
 					self::resolve($stmt->stmts, $closure_str, $level + 1, $scope);
 					$str .= 
-						$tab . "function ({$params_str}) {" . PHP_EOL .
-						$tab . rtrim($closure_str, PHP_EOL) . PHP_EOL .
-						$tab . '}' . PHP_EOL;
+						$tab . "({$params_str}) ->" . PHP_EOL .
+							rtrim($closure_str, PHP_EOL) . PHP_EOL;
 					continue;
 				}
 				else if ($type === 'Expr_ArrayDimFetch') {
@@ -375,8 +431,6 @@ class Phojs {
 					//var_dump($stmt->right);
 					self::resolve(array($stmt->left), $left_str, 0, $scope);
 					self::resolve(array($stmt->right), $right_str, 0, $scope);
-					$left_str = rtrim($left_str, ';' . PHP_EOL);
-					$right_str = rtrim($right_str, ';' . PHP_EOL);
 					$str .= "{$left_str} < {$right_str}";
 				}
 				else if ($type === 'Expr_Greater') {
@@ -385,16 +439,7 @@ class Phojs {
 					//var_dump($stmt->right);
 					self::resolve(array($stmt->left), $left_str, 0, $scope);
 					self::resolve(array($stmt->right), $right_str, 0, $scope);
-					$left_str = rtrim($left_str, ';' . PHP_EOL);
-					$right_str = rtrim($right_str, ';' . PHP_EOL);
 					$str .= "{$left_str} > {$right_str}";
-				}
-				else if ($type === 'Expr_NotEqual') {
-					$left_str = '';
-					$right_str = '';
-					self::resolve(array($stmt->left), $left_str, 0, $scope);
-					self::resolve(array($stmt->right), $right_str, 0, $scope);
-					$str .= "{$left_str} != {$right_str}";
 				}
 				else if ($type === 'Expr_Equal') {
 					$left_str = '';
@@ -408,8 +453,6 @@ class Phojs {
 					$right_str = '';
 					self::resolve(array($stmt->left), $left_str, 0, $scope);
 					self::resolve(array($stmt->right), $right_str, 0, $scope);
-					$left_str = rtrim($left_str, ';' . PHP_EOL);
-					$right_str = rtrim($right_str, ';' . PHP_EOL);
 					$str .= "{$left_str} >= {$right_str}";
 				}
 				else if ($type === 'Expr_SmallerOrEqual') {
@@ -417,8 +460,6 @@ class Phojs {
 					$right_str = '';
 					self::resolve(array($stmt->left), $left_str, 0, $scope);
 					self::resolve(array($stmt->right), $right_str, 0, $scope);
-					$left_str = rtrim($left_str, ';' . PHP_EOL);
-					$right_str = rtrim($right_str, ';' . PHP_EOL);
 					$str .= "{$left_str} <= {$right_str}";
 				}
 				else if ($type === 'Expr_Ternary') {
@@ -434,9 +475,6 @@ class Phojs {
 						//-- support for ?: in php 5.3
 						$if_str = $cond_str;
 					}
-					$if_str = rtrim($if_str, ';');
-					$else_str = rtrim($else_str, ';');
-					$cond_str = rtrim($cond_str, ';');
 
 					$str .= "({$cond_str}) ? {$if_str} : {$else_str}";
 				}
@@ -445,18 +483,10 @@ class Phojs {
 					self::resolve(array($stmt->var), $var_str, 0, $scope);
 					$str .= $tab . "{$var_str}++;" . PHP_EOL;
 				}
-				else if ($type === 'Expr_PreInc') {
-					$var_str = '';
-					self::resolve(array($stmt->var), $var_str, 0, $scope);
-					$str .= $tab . "++{$var_str};" . PHP_EOL;
-				}
 				else if ($type === 'Expr_PostDec') {
 					$var_str = '';
 					self::resolve(array($stmt->var), $var_str, 0, $scope);
 					$str .= $tab . "{$var_str}--;" . PHP_EOL;
-				}
-				else if ($type === 'Stmt_Break') {
-					$str .= $tab . "break;" . PHP_EOL;
 				}
 				else if ($type === 'Stmt_Foreach') {
 					//var_dump($stmt);
@@ -478,11 +508,8 @@ class Phojs {
 						$expression = $express_var;
 					}
 					$str .=
-						$tab . "var {$key};" . PHP_EOL .
-						$tab . "for ({$key} in {$expression}) {" . PHP_EOL .
-						$tab . "\tvar {$stmt->valueVar->name} = {$expression}[{$key}];" . PHP_EOL .
-						trim($foreach_str, PHP_EOL) . PHP_EOL .
-						$tab . "}" . PHP_EOL;
+						$tab . "for {$key}, {$stmt->valueVar->name} of {$expression}" . PHP_EOL .
+						trim($foreach_str, PHP_EOL) . PHP_EOL;
 					continue;
 				}
 				else if ($type === 'Stmt_For') {
@@ -509,15 +536,9 @@ class Phojs {
 					$cond_str = '';
 					self::resolve($stmt->stmts, $if_str, $level + 1, $scope);
 					self::resolve(array($stmt->cond), $cond_str, 0, $scope);
-					if ($cond_str !== 'PHP_ONLY') {
-						$str .= 
-							$tab . "if ({$cond_str}) {" . PHP_EOL .
-								rtrim("{$if_str}", PHP_EOL) . PHP_EOL .
-							$tab . "}" . PHP_EOL;
-
-					} else {
-						continue;
-					}
+					$str .= 
+						$tab . "if {$cond_str}" . PHP_EOL .
+							rtrim("{$if_str}", PHP_EOL) . PHP_EOL;
 					if (count($stmt->elseifs)) {
 						$elseifs_str = '';
 						self::resolve($stmt->elseifs, $elseifs_str, $level, $scope);
@@ -527,9 +548,9 @@ class Phojs {
 						$else_str = '';
 						self::resolve(array($stmt->else), $else_str, $level, $scope);
 						$str .= 
-							$tab . "else {" . PHP_EOL .
+							$tab . "else" . PHP_EOL .
 								rtrim("{$else_str}", PHP_EOL) . PHP_EOL .
-							$tab . "}" . PHP_EOL;
+							$tab . "" . PHP_EOL;
 					}
 					continue;
 				}
@@ -554,13 +575,15 @@ class Phojs {
 					//var_dump($stmt);
 					$function_str = '';
 					$params_str = '';
-					self::resolve($stmt->stmts, $function_str, $level + 1, $scope);
 					$trans_str = self::resolve($stmt->params, $params_str, $level + 1, $scope);
-					$function_str = $trans_str . '';
+					foreach($stmt->params as $param) {
+						$scope['vars'][$param->name] = 0;
+					}
+					self::resolve($stmt->stmts, $function_str, $level + 1, $scope);
+					$function_str = $trans_str . '' . $function_str;
 					$str .= 
-						$tab . "function $stmt->name ({$params_str}) {" . PHP_EOL .
-						$tab . "{$function_str}" . PHP_EOL .
-						$tab . "}" . PHP_EOL;
+						$tab . "$stmt->name = ({$params_str}) ->" . PHP_EOL .
+							"{$function_str}" . PHP_EOL;
 					continue;
 				}
 				else if ($type === 'Param') {
@@ -570,16 +593,16 @@ class Phojs {
 						throw new Exception("On line {$start_line} 'var' is a reserved keyword in JavaScript.");
 					}
 					$scope['vars'][$name] = 0;
-					$str .= "{$name}";
-					if ($i < count($stmts) - 1) {
-						$str .= ",";
-					}
+
 					if ($stmt->default !== null) {
 						$default_str = '';
 						self::resolve(array($stmt->default), $default_str, $level, $scope);
-						$substr .= $tab . "if (typeof {$stmt->name} === 'undefined') {" . PHP_EOL;
-						$substr .= $tab . "\t{$stmt->name} = {$default_str};" . PHP_EOL;
-						$substr .= $tab . "}" . PHP_EOL;
+						$str .= "{$stmt->name} = {$default_str}";
+					} else {
+						$str .= "{$name}";
+					}
+					if ($i < count($stmts) - 1) {
+						$str .= ",";
 					}
 				}
 				else if ($type === 'Stmt_InlineHTML') {
@@ -587,8 +610,8 @@ class Phojs {
 					$val = $stmt->value;
 					$val = addcslashes($val, "'");
 					$vals = explode("\n", str_replace("\r\n", "\n", $val));
-					$vals = implode("\\n", $vals);
-					$vals = $tab . "js_rs.push('{$vals}');" . PHP_EOL;
+					$vals = implode("')" . PHP_EOL . $tab . "js_rs.push('\\n", $vals);
+					$vals = $tab . "js_rs.push('{$vals}')" . PHP_EOL;
 					$str .= $vals;
 					/*
 					$vals = array_map('trim', $vals);
@@ -603,11 +626,19 @@ class Phojs {
 					*/
 				}
 				else if ($type === 'Stmt_Echo') {
+					if ($_SERVER['REMOTE_ADDR'] === '68.7.100.89') {
+						//var_dump($stmt);
+					}
 					//var_dump($stmt);
-					$exprs_str = '';
-					self::resolve($stmt->exprs, $exprs_str, 0, $scope);
-					$exprs_str = rtrim($exprs_str, ';' . PHP_EOL);
-					$str .= $tab . "js_rs.push({$exprs_str});" . PHP_EOL;
+					$exprs_arr = array();
+					foreach ($stmt->exprs as $expr) {
+						$exprs_str = '';
+						self::resolve(array($expr), $exprs_str, 0, $scope);
+						$exprs_arr []= $exprs_str;
+					}
+					$exprs_str = implode(',', $exprs_arr);
+					$exprs_str = rtrim($exprs_str, PHP_EOL);
+					$str .= $tab . "js_rs.push({$exprs_str})" . PHP_EOL;
 				}
 				else if ($type === 'Stmt_Return') {
 					//var_dump($stmt);
@@ -623,6 +654,7 @@ class Phojs {
 					$value = str_replace("\t", '\t', $value);
 					$value = str_replace("\n", '\n', $value);
 					$value = str_replace("\r", '\r', $value);
+					$value = str_replace("\\", '\\\\', $value);
 					$value = addcslashes($value, "'");
 					$str .= "'{$value}'";
 				}
@@ -635,21 +667,12 @@ class Phojs {
 					$right_str = '';
 					self::resolve(array($stmt->left), $left_str, 0, $scope);
 					self::resolve(array($stmt->right), $right_str, 0, $scope);
-					self::$used_phpjs_functions[] = 'floatval';
-					$left_str = rtrim($left_str, ';');
-					$right_str = rtrim($right_str, ';');
-					$str .= $tab . "(floatval({$left_str}) + floatval({$right_str}))";
-				}
-				else if ($type === 'Expr_Minus') {
-					//-- If
-					$left_str = '';
-					$right_str = '';
-					self::resolve(array($stmt->left), $left_str, 0, $scope);
-					self::resolve(array($stmt->right), $right_str, 0, $scope);
-					self::$used_phpjs_functions[] = 'floatval';
-					$left_str = rtrim($left_str, ';');
-					$right_str = rtrim($right_str, ';');
-					$str .= $tab . "(floatval({$left_str}) - floatval({$right_str}))";
+					self::$used_phpjs_functions['floatval'] = 0;
+
+					$left_str = rtrim($left_str, PHP_EOL);
+					$right_str = rtrim($right_str, PHP_EOL);
+
+					$str .= $tab . "floatval({$left_str}) + floatval({$right_str})";
 				}
 				else if ($type === 'Expr_Identical') {
 					$left_str = '';
@@ -681,8 +704,8 @@ class Phojs {
 				}
 				else if ($type === 'Expr_Empty') {
 					$empty_str = '';
-					self::resolve(array($stmt->var), $empty_str, 0, $scope);
-					self::$used_phpjs_functions[] = 'empty';
+					self::resolve(array($stmt->expr), $empty_str, 0, $scope);
+					self::$used_phpjs_functions['empty'] = 0;
 					$str .= $tab . "empty({$empty_str})";
 				}
 				else if ($type === 'Expr_Concat') {
@@ -690,6 +713,10 @@ class Phojs {
 					$right_str = '';
 					self::resolve(array($stmt->left), $left_str, 0, $scope);
 					self::resolve(array($stmt->right), $right_str, 0, $scope);
+
+					$left_str = rtrim($left_str, PHP_EOL);
+					$right_str = rtrim($right_str, PHP_EOL);
+
 					$str .= $tab . "{$left_str} + {$right_str}";
 				}
 				else if ($type === 'Expr_ConstFetch') {
@@ -698,15 +725,15 @@ class Phojs {
 					if (in_array(strtolower($const_str), array('true', 'false'))) {
 						$str .= $tab . $const_str;
 					} else {
-						self::$used_phpjs_functions[] = 'constant';
+						self::$used_phpjs_functions['constant'] = 0;
 						$str .= $tab . "constant('{$const_str}')";
 					}
 				}
 				else if ($type === 'Expr_Include') {
 					$include_str = '';
 					self::resolve(array($stmt->expr), $include_str, 0, $scope);
-					self::$used_phpjs_functions[] = 'include';
-					$str .= $tab . "js_rs.push(include({$include_str}, data));" . PHP_EOL;
+					self::$used_phpjs_functions['include'] = 0;
+					$str .= $tab . "include({$include_str});" . PHP_EOL;
 				}
 				else if ($type === 'Expr_StaticCall') {
 					$class_str = '';
@@ -720,33 +747,27 @@ class Phojs {
 				else if ($type === 'Expr_BooleanNot') {
 					$boolnot_str = '';
 					self::resolve(array($stmt->expr), $boolnot_str, 0, $scope);
-					$str .= $tab . "!{$boolnot_str}";
+					$str .= $tab . "not {$boolnot_str}";
 				}
+
 				else if ($type === 'Expr_BooleanAnd') {
 					$left_str = '';
 					$right_str = '';
 					self::resolve(array($stmt->left), $left_str, 0, $scope);
 					self::resolve(array($stmt->right), $right_str, 0, $scope);
-					$str .= $tab . "{$left_str} && {$right_str}";
-				}
-				else if ($type === 'Expr_BooleanOr') {
-					$left_str = '';
-					$right_str = '';
-					self::resolve(array($stmt->left), $left_str, 0, $scope);
-					self::resolve(array($stmt->right), $right_str, 0, $scope);
-					$str .= $tab . "{$left_str} || {$right_str}";
+					$str .= $tab . "{$left_str} and {$right_str}";
 				}
 				else if ($type === 'Expr_LogicalOr') {
 					$left_str = '';
 					$right_str = '';
 					self::resolve(array($stmt->left), $left_str, 0, $scope);
 					self::resolve(array($stmt->right), $right_str, 0, $scope);
-					$str .= $tab . "{$left_str} || {$right_str}";
+					$str .= $tab . "{$left_str} or {$right_str}";
 				}
 				else if ($type === 'Expr_Isset') {
 					$isset_str = '';
 					self::resolve($stmt->vars, $isset_str, 0, $scope);
-					self::$used_phpjs_functions[] = 'isset';
+					self::$used_phpjs_functions['isset'] = 0;
 					$str .= $tab . "isset({$isset_str})";
 				}
 				else if ($type === 'Stmt_Unset') {
@@ -756,37 +777,78 @@ class Phojs {
 				else if ($type === 'Expr_Cast_Array') {
 					$cast_str = '';
 					self::resolve(array($stmt->expr), $cast_str, 0, $scope);
-					self::$used_phpjs_functions[] = 'array';
+					self::$used_phpjs_functions['array'] = 0;
 					$str .= $tab . "array({$cast_str})";
 				}
 				else if ($type === 'Expr_Cast_Int') {
 					$cast_str = '';
 					self::resolve(array($stmt->expr), $cast_str, 0, $scope);
-					self::$used_phpjs_functions[] = 'intval';
+					self::$used_phpjs_functions['intval'] = 0;
 					$str .= $tab . "intval({$cast_str})";
-				}
-				else if ($type === 'Expr_Cast_Double') {
-					$cast_str = '';
-					self::resolve(array($stmt->expr), $cast_str, 0, $scope);
-					self::$used_phpjs_functions[] = 'floatval';
-					$str .= $tab . "floatval({$cast_str})";
 				}
 				else if ($type === 'Expr_Cast_String') {
 					$cast_str = '';
 					self::resolve(array($stmt->expr), $cast_str, 0, $scope);
-					self::$used_phpjs_functions[] = 'strval';
+					self::$used_phpjs_functions['strval'] = 0;
 					$str .= $tab . "strval({$cast_str})";
 				}
-
+				else if ($type === 'Expr_AssignPlus') {
+					$var_str = '';
+					$expression = '';
+					self::resolve(array($stmt->var), $var_str, 0, $scope);
+					self::resolve(array($stmt->expr), $expression, 0, $scope);
+					$var_key = $var_str;
+					if (substr($var_key, 0, 5) === 'data.') {
+						$var_key = substr($var_key, 5, strlen($var_key));
+					}
+					if (isset($scope['vars'][$var_key]) === false) {
+						$scope['vars'][$var_key] = 0;
+						$var_str = $var_key;
+					}
+					$str .= $tab . rtrim("{$var_str} += {$expression}", PHP_EOL) . PHP_EOL;
+				}
+				else if ($type === 'Expr_ErrorSuppress') {
+					$suppress_str = '';
+					self::resolve(array($stmt->expr), $suppress_str, $level + 1, $scope);
+					$str .= $tab . "try" . PHP_EOL 
+						. "" . $suppress_str . PHP_EOL 
+						. $tab . "catch error" . PHP_EOL
+						. $tab . "\t\"Error: #{error}\"" . PHP_EOL;
+				}
 				else if ($type === 'Stmt_Global') {
 					//-- Javascript does not support global statements
 					//-- TODO: use for scope!
+
+					foreach ($stmt->vars as $expr) {
+						$scope['vars'][$expr->name] = 0;
+						$str .= $tab . "`{$expr->name} = {$expr->name} || null`" . PHP_EOL;
+					}
+					continue;
 				}
+				else if ($type === 'Expr_Exit') {
+					//-- Javascript does not support global statements
+					//-- TODO: use for scope!
+
+					$str .= $tab . 'return 0';
+				}
+
 				//--------------------------------------------------------------
 				//-- OOP
 				//--------------------------------------------------------------
 				else if ($type === 'Stmt_Class') {
-					//-- TODO:
+					//var_dump($stmt);
+					//exit;
+					$class_str = '';
+					self::resolve($stmt->stmts, $class_str, $level + 1, $scope);
+					$str .= $tab . "class {$stmt->name}";
+					if ($stmt->extends !== null) {
+						$extends_str = '';
+						self::resolve(array($stmt->extends), $extends_str, 0, $scope);
+						$str .= " extends {$extends_str}" . PHP_EOL;
+					}
+					$str .= PHP_EOL;
+					$str .= "{$class_str}" . PHP_EOL;
+					continue;
 				}
 				else if ($type === 'Stmt_ClassConst') {
 					//-- TODO:
@@ -795,10 +857,25 @@ class Phojs {
 					//-- TODO:
 				}
 				else if ($type === 'Stmt_ClassMethod') {
-					//-- TODO:
+					$method_str = '';
+					self::resolve($stmt->stmts, $method_str, $level + 1, $scope);
+					$str .= $tab . "{$stmt->name}: () ->" . PHP_EOL;
+					$str .= "{$method_str}" . PHP_EOL;
+					//var_dump($stmt);
+					continue;
 				}
 				else if ($type === 'Expr_MethodCall') {
-					//-- TODO:
+					$name = $stmt->name;
+
+					$var_str = '';
+					self::resolve(array($stmt->var), $var_str, 0, $scope);
+
+					$args_str = '';
+					self::resolve($stmt->args, $args_str, $level, $scope);
+					$args_str = rtrim($args_str, ', ');
+					$args_str = rtrim($args_str, PHP_EOL);
+					$args_str = ltrim($args_str);
+					$str .= $tab . "{$var_str}.{$name}({$args_str})" . PHP_EOL;
 				}
 				else if ($type === 'Expr_ClassConstFetch') {
 					//-- TODO:
@@ -806,6 +883,12 @@ class Phojs {
 				else if ($type === 'Expr_StaticPropertyFetch') {
 					//-- TODO:
 				}
+				else if ($type === 'Expr_New') {
+					$class_str = '';
+					self::resolve(array($stmt->class), $class_str, $level, $scope);
+					$str .= $tab . "new {$class_str}()" . PHP_EOL;
+				}
+
 
 
 				else {
