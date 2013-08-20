@@ -113,6 +113,8 @@ class Phojs {
 	}
 
 	public function toCoffee($fn, $code, $wrap = false) {
+		$code = str_replace(array('<? ', '<?='), array('<?php ', '<?php echo '), $code);
+		
 		$parser = new PHPParser_Parser(new PHPParser_Lexer);
 		
 		try {
@@ -147,15 +149,16 @@ class Phojs {
 	public function toJavascript($code, $phpjs = false) {
 		CoffeeScript\Init::load();
 
-		$js = '';
+		$output = '';
 		if ($phpjs) {
-			$js .= $this->compilePhpJs() . PHP_EOL;
+			$output .= $this->compilePhpJs() . PHP_EOL;
 		}
 
 		$js = CoffeeScript\Compiler::compile($code, array('header' => false));
 		$js = '  ' . trim(substr($js, 13, -15)) . PHP_EOL;
-		$js = "function (_resp) {\n{$js}}\n";
-		return $js;
+		$output .= $js;
+
+		return $output;
 	}
 
 	public function parse($fn, $code, $phpjs = false) {
