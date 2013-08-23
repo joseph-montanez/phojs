@@ -140,7 +140,7 @@ class Phojs {
 				"{$out}" . PHP_EOL .
 				"\tjs_rs.join('')" . PHP_EOL;
 		} else {
-			$coffee = "\tjs_rs = []" . PHP_EOL . $out . PHP_EOL;
+			$coffee = $out;
 		}
 
 		return $coffee;
@@ -367,7 +367,11 @@ class Phojs {
 					//var_dump($stmt);
 					$name = $stmt->name;
 					if (isset($scope['vars'][$name]) === false) {
-						$name = 'data.' . $name;
+						if ($name === 'this') {
+							$name = '@';
+						} else {
+							$name = 'data.' . $name;
+						}
 					}
 					$str .= $name;
 				}
@@ -857,18 +861,35 @@ class Phojs {
 					//-- TODO:
 				}
 				else if ($type === 'Stmt_Property') {
-					//-- TODO:
+					//-- Cannot support private
+					$props_str = '';
+					self::resolve($stmt->props, $props_str, $level, $scope);
+					$str .= "{$props_str}" . PHP_EOL;
+				}
+				else if ($type === 'Stmt_PropertyProperty') {
+					$name_str = $stmt->name;
+					$default_str = '';
+					if ($stmt->default === null) {
+						$default_str = 'null';
+					} else {
+						self::resolve(array($stmt->default), $default_str, 0, $scope);
+					}
+					$str .= $tab . "\"{$name_str}\": {$default_str}" . PHP_EOL;
 				}
 				else if ($type === 'Stmt_ClassMethod') {
+					$name = $stmt->name;
+					if ($name === '__construct') {
+						$name = 'constructor';
+					}
 					$method_str = '';
 					self::resolve($stmt->stmts, $method_str, $level + 1, $scope);
-					$str .= $tab . "{$stmt->name}: () ->" . PHP_EOL;
+					$str .= $tab . "{$name}: () ->" . PHP_EOL;
 					$str .= "{$method_str}" . PHP_EOL;
-					//var_dump($stmt);
 					continue;
 				}
 				else if ($type === 'Expr_MethodCall') {
 					$name = $stmt->name;
+
 
 					$var_str = '';
 					self::resolve(array($stmt->var), $var_str, 0, $scope);
